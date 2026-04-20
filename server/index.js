@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { existsSync } from 'node:fs';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { Readable } from 'node:stream';
@@ -225,6 +226,20 @@ app.post('/api/chat', async (req, res) => {
     res.end();
   }
 });
+
+const CLIENT_DIST = path.resolve(__dirname, '..', 'client', 'dist');
+if (existsSync(CLIENT_DIST)) {
+  app.use(express.static(CLIENT_DIST));
+  app.use((req, res, next) => {
+    if (req.method !== 'GET' || req.path.startsWith('/api/')) return next();
+    res.sendFile(path.join(CLIENT_DIST, 'index.html'));
+  });
+  console.log(`Serving built client from ${CLIENT_DIST}`);
+} else {
+  console.log(
+    `No built client found at ${CLIENT_DIST}. Run "npm --prefix client run build" to enable static hosting.`,
+  );
+}
 
 loadDocument()
   .then(() => {

@@ -51,6 +51,23 @@ cd client && npm install && npm run dev
 - The system prompt tells the model to prefer the filing, and to only use web search for current-events questions related to Webster Financial or the banking industry. Any citations returned by the model are shown in the UI under the assistant's reply.
 - xAI's automatic prompt caching keeps repeat-turn input costs low since the document prefix is identical across requests.
 
+## Production (AWS EC2)
+
+A minimal single-instance production setup lives in [`deploy/`](deploy/): one Ubuntu 24.04 EC2 (`t3.small`) behind Caddy (auto HTTPS via Let's Encrypt), Node under systemd, `XAI_API_KEY` pulled from SSM Parameter Store, and a manual rsync-based deploy.
+
+1. Do the one-time AWS setup (SSM parameter, IAM role, EC2 + Elastic IP, DNS) per [`deploy/README.md`](deploy/README.md).
+2. Provision the instance:
+   ```bash
+   rsync -az deploy/ ubuntu@<EIP>:/tmp/deploy/
+   ssh ubuntu@<EIP> 'sudo DOMAIN=chat.example.com bash /tmp/deploy/bootstrap.sh'
+   ```
+3. Deploy from your laptop:
+   ```bash
+   HOST=<EIP-or-dns> ./scripts/deploy.sh
+   ```
+
+Tail logs with `ssh ubuntu@<EIP> 'sudo journalctl -u webster-sec -f'`.
+
 ## Project layout
 
 ```
@@ -59,5 +76,7 @@ webster-sec-filing/
 ├── package.json   # root scripts: start.sh helpers, concurrently
 ├── start.sh       # one-shot installer + launcher
 ├── server/        # Node/Express + pdf-parse + openai SDK
-└── client/        # Vite + React chat UI
+├── client/        # Vite + React chat UI
+├── deploy/        # EC2 + Caddy + systemd production setup
+└── scripts/       # deploy.sh (manual rsync-based deploy)
 ```
