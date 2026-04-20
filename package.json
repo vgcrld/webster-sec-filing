@@ -1,0 +1,16 @@
+{
+  "name": "webster-sec-filing",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Chat app for asking questions about the Webster SEC filing",
+  "scripts": {
+    "install:all": "npm --prefix server install && npm --prefix client install",
+    "start": "npm run install:all && concurrently -k -n server,client -c blue,green \"npm --prefix server start\" \"npm --prefix client run dev\"",
+    "dev": "concurrently -k -n server,client -c blue,green \"npm --prefix server start\" \"npm --prefix client run dev\"",
+    "server": "npm --prefix server start",
+    "client": "npm --prefix client run dev"
+  },
+  "devDependencies": {
+    "concurrently": "^9.1.0"
+  }
+}
