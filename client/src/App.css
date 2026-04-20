@@ -291,6 +291,69 @@ body {
   margin: 16px 0;
 }
 
+.read-aloud-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-top: 10px;
+}
+
+.read-aloud {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 4px 8px;
+  border-radius: 6px;
+  border: 1px solid transparent;
+  background: transparent;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 500;
+  cursor: pointer;
+  transition: color 120ms ease, background 120ms ease, border-color 120ms ease;
+}
+
+.read-aloud:hover {
+  color: var(--accent);
+  background: rgba(79, 140, 255, 0.08);
+  border-color: var(--border);
+}
+
+.read-aloud:focus-visible {
+  outline: none;
+  border-color: var(--accent);
+}
+
+.read-aloud--playing {
+  color: var(--accent);
+  border-color: var(--border);
+  background: rgba(79, 140, 255, 0.08);
+}
+
+.read-aloud--loading {
+  cursor: progress;
+  color: var(--muted);
+}
+
+.read-aloud__text {
+  line-height: 1;
+}
+
+.read-aloud__spin {
+  animation: read-aloud-spin 0.9s linear infinite;
+}
+
+@keyframes read-aloud-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.read-aloud__error {
+  color: var(--error);
+  font-size: 12px;
+}
+
 .citations {
   margin-top: 12px;
   padding-top: 10px;

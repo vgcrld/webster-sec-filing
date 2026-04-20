@@ -2,6 +2,220 @@ import { useEffect, useRef, useState } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
 
+function toPlainText(md) {
+  if (!md) return '';
+  let out = md;
+  out = out.replace(/```[\s\S]*?```/g, ' ');
+  out = out.replace(/`([^`]+)`/g, '$1');
+  out = out.replace(/!\[[^\]]*\]\([^)]*\)/g, '');
+  out = out.replace(/\[([^\]]+)\]\([^)]+\)/g, '$1');
+  out = out.replace(/^\s{0,3}#{1,6}\s+/gm, '');
+  out = out.replace(/^\s{0,3}>\s?/gm, '');
+  out = out.replace(/^\s*[-*+]\s+/gm, '');
+  out = out.replace(/^\s*\d+\.\s+/gm, '');
+  out = out.replace(/(\*\*|__)(.*?)\1/g, '$2');
+  out = out.replace(/(\*|_)(.*?)\1/g, '$2');
+  out = out.replace(/~~(.*?)~~/g, '$1');
+  out = out.replace(/^\s*([-*_])\s*\1\s*\1[\s\S]*?$/gm, '');
+  out = out.replace(/\|/g, ' ');
+  out = out.replace(/\r/g, '');
+  out = out.replace(/[ \t]+/g, ' ');
+  out = out.replace(/\n{2,}/g, '\n\n');
+  return out.trim();
+}
+
+const currentAudioController = {
+  audio: null,
+  url: null,
+  stopper: null,
+};
+
+function stopCurrentAudio() {
+  if (currentAudioController.audio) {
+    try {
+      currentAudioController.audio.pause();
+    } catch {
+      // ignore
+    }
+  }
+  if (currentAudioController.url) {
+    URL.revokeObjectURL(currentAudioController.url);
+  }
+  if (typeof currentAudioController.stopper === 'function') {
+    const fn = currentAudioController.stopper;
+    currentAudioController.stopper = null;
+    fn();
+  }
+  currentAudioController.audio = null;
+  currentAudioController.url = null;
+}
+
+function SpeakerIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+      <path
+        d="M4 9h4l5-4v14l-5-4H4z"
+        fill="currentColor"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinejoin="round"
+      />
+      <path
+        d="M16 8.5a4 4 0 0 1 0 7M18.5 6a7 7 0 0 1 0 12"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="1.5"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function StopIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true">
+      <rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" />
+    </svg>
+  );
+}
+
+function SpinnerIcon() {
+  return (
+    <svg viewBox="0 0 24 24" width="16" height="16" aria-hidden="true" className="read-aloud__spin">
+      <circle cx="12" cy="12" r="9" fill="none" stroke="currentColor" strokeWidth="2" opacity="0.25" />
+      <path
+        d="M21 12a9 9 0 0 0-9-9"
+        fill="none"
+        stroke="currentColor"
+        strokeWidth="2"
+        strokeLinecap="round"
+      />
+    </svg>
+  );
+}
+
+function ReadAloudButton({ text }) {
+  const [status, setStatus] = useState('idle');
+  const [error, setError] = useState('');
+  const abortRef = useRef(null);
+
+  useEffect(() => {
+    return () => {
+      if (abortRef.current) {
+        try {
+          abortRef.current.abort();
+        } catch {
+          // ignore
+        }
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!error) return;
+    const t = setTimeout(() => setError(''), 4000);
+    return () => clearTimeout(t);
+  }, [error]);
+
+  async function handleClick() {
+    if (status === 'playing') {
+      stopCurrentAudio();
+      setStatus('idle');
+      return;
+    }
+    if (status === 'loading') return;
+
+    stopCurrentAudio();
+    setError('');
+    setStatus('loading');
+
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    try {
+      const plain = toPlainText(text);
+      if (!plain) {
+        setStatus('idle');
+        return;
+      }
+      const res = await fetch('/api/speak', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: plain }),
+        signal: controller.signal,
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || `Request failed (${res.status})`);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+
+      const cleanup = () => {
+        if (currentAudioController.audio === audio) {
+          currentAudioController.audio = null;
+          currentAudioController.url = null;
+          currentAudioController.stopper = null;
+        }
+        URL.revokeObjectURL(url);
+        setStatus('idle');
+      };
+
+      audio.onended = cleanup;
+      audio.onerror = () => {
+        cleanup();
+        setError('Playback failed');
+      };
+
+      currentAudioController.audio = audio;
+      currentAudioController.url = url;
+      currentAudioController.stopper = () => setStatus('idle');
+
+      await audio.play();
+      setStatus('playing');
+    } catch (err) {
+      if (err?.name === 'AbortError') {
+        setStatus('idle');
+        return;
+      }
+      setError(err?.message || 'Read-aloud failed');
+      setStatus('idle');
+    } finally {
+      abortRef.current = null;
+    }
+  }
+
+  const label =
+    status === 'playing'
+      ? 'Stop'
+      : status === 'loading'
+        ? 'Loading audio...'
+        : 'Read aloud';
+
+  return (
+    <div className="read-aloud-row">
+      <button
+        type="button"
+        className={`read-aloud read-aloud--${status}`}
+        onClick={handleClick}
+        aria-label={label}
+        title={label}
+      >
+        {status === 'loading' ? (
+          <SpinnerIcon />
+        ) : status === 'playing' ? (
+          <StopIcon />
+        ) : (
+          <SpeakerIcon />
+        )}
+        <span className="read-aloud__text">{label}</span>
+      </button>
+      {error && <span className="read-aloud__error">{error}</span>}
+    </div>
+  );
+}
+
 function MessageContent({ role, content, citations, pending, status }) {
   if (role === 'user') {
     return <div className="bubble__content">{content}</div>;
@@ -24,6 +238,7 @@ function MessageContent({ role, content, citations, pending, status }) {
           {pending && <span className="caret" aria-hidden="true" />}
         </>
       )}
+      {!pending && content && <ReadAloudButton text={content} />}
       {citations && citations.length > 0 && (
         <div className="citations">
           <div className="citations__label">Sources</div>

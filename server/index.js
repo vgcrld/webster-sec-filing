@@ -1,6 +1,7 @@
 import 'dotenv/config';
 import fs from 'node:fs/promises';
 import path from 'node:path';
+import { Readable } from 'node:stream';
 import { fileURLToPath } from 'node:url';
 
 import cors from 'cors';
@@ -105,6 +106,56 @@ function extractCitations(response) {
 function sseWrite(res, payload) {
   res.write(`data: ${JSON.stringify(payload)}\n\n`);
 }
+
+const TTS_MAX_CHARS = 15000;
+const ALLOWED_VOICES = new Set(['ara', 'eve', 'leo', 'rex', 'sal']);
+
+app.post('/api/speak', async (req, res) => {
+  const { text, voice } = req.body ?? {};
+  if (typeof text !== 'string' || !text.trim()) {
+    return res.status(400).json({ error: 'text must be a non-empty string' });
+  }
+
+  const voiceId = ALLOWED_VOICES.has(voice) ? voice : 'eve';
+  const trimmed = text.length > TTS_MAX_CHARS ? text.slice(0, TTS_MAX_CHARS) : text;
+
+  try {
+    const upstream = await fetch('https://api.x.ai/v1/tts', {
+      method: 'POST',
+      headers: {
+        Authorization: `Bearer ${process.env.XAI_API_KEY}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({
+        text: trimmed,
+        voice_id: voiceId,
+        language: 'en',
+      }),
+    });
+
+    if (!upstream.ok || !upstream.body) {
+      const errText = await upstream.text().catch(() => '');
+      let errMessage = errText;
+      try {
+        const parsed = JSON.parse(errText);
+        errMessage = parsed?.error?.message || parsed?.error || errText;
+      } catch {
+        // not JSON; use raw text
+      }
+      return res
+        .status(upstream.status || 502)
+        .json({ error: errMessage || `TTS request failed (${upstream.status})` });
+    }
+
+    res.setHeader('Content-Type', upstream.headers.get('content-type') || 'audio/mpeg');
+    res.setHeader('Cache-Control', 'no-store');
+
+    Readable.fromWeb(upstream.body).pipe(res);
+  } catch (err) {
+    console.error('Speak error:', err);
+    res.status(500).json({ error: err?.message ?? 'Unknown error' });
+  }
+});
 
 app.post('/api/chat', async (req, res) => {
   const { messages } = req.body ?? {};
