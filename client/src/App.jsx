@@ -25,29 +25,56 @@ function toPlainText(md) {
 }
 
 const currentAudioController = {
-  audio: null,
-  url: null,
   stopper: null,
 };
 
 function stopCurrentAudio() {
-  if (currentAudioController.audio) {
-    try {
-      currentAudioController.audio.pause();
-    } catch {
-      // ignore
-    }
-  }
-  if (currentAudioController.url) {
-    URL.revokeObjectURL(currentAudioController.url);
-  }
   if (typeof currentAudioController.stopper === 'function') {
     const fn = currentAudioController.stopper;
     currentAudioController.stopper = null;
     fn();
   }
-  currentAudioController.audio = null;
-  currentAudioController.url = null;
+}
+
+// Split text into chunks on sentence boundaries so the first chunk is small
+// and can start playing quickly while later chunks are still being generated.
+function splitForTTS(text, targetLen = 350) {
+  const clean = text.replace(/\s+/g, ' ').trim();
+  if (!clean) return [];
+  const sentences = clean.match(/[^.!?]+[.!?]+(?:\s|$)|[^.!?]+$/g) ?? [clean];
+  const chunks = [];
+  let current = '';
+  for (const raw of sentences) {
+    const s = raw.trim();
+    if (!s) continue;
+    if (s.length >= targetLen) {
+      if (current) {
+        chunks.push(current.trim());
+        current = '';
+      }
+      // Break a very long sentence into ~targetLen pieces on word boundaries.
+      const words = s.split(' ');
+      let buf = '';
+      for (const w of words) {
+        if ((buf + ' ' + w).trim().length > targetLen && buf) {
+          chunks.push(buf.trim());
+          buf = w;
+        } else {
+          buf = buf ? buf + ' ' + w : w;
+        }
+      }
+      if (buf) current = buf;
+      continue;
+    }
+    if ((current + ' ' + s).trim().length > targetLen && current) {
+      chunks.push(current.trim());
+      current = s;
+    } else {
+      current = current ? current + ' ' + s : s;
+    }
+  }
+  if (current.trim()) chunks.push(current.trim());
+  return chunks;
 }
 
 function SpeakerIcon() {
@@ -97,16 +124,12 @@ function SpinnerIcon() {
 function ReadAloudButton({ text }) {
   const [status, setStatus] = useState('idle');
   const [error, setError] = useState('');
-  const abortRef = useRef(null);
+  const sessionRef = useRef(null);
 
   useEffect(() => {
     return () => {
-      if (abortRef.current) {
-        try {
-          abortRef.current.abort();
-        } catch {
-          // ignore
-        }
+      if (sessionRef.current) {
+        sessionRef.current.cancel();
       }
     };
   }, []);
@@ -118,30 +141,66 @@ function ReadAloudButton({ text }) {
   }, [error]);
 
   async function handleClick() {
-    if (status === 'playing') {
+    if (status === 'playing' || status === 'loading') {
       stopCurrentAudio();
       setStatus('idle');
       return;
     }
-    if (status === 'loading') return;
 
     stopCurrentAudio();
     setError('');
     setStatus('loading');
 
-    const controller = new AbortController();
-    abortRef.current = controller;
+    const plain = toPlainText(text);
+    const chunks = splitForTTS(plain);
+    if (chunks.length === 0) {
+      setStatus('idle');
+      return;
+    }
 
-    try {
-      const plain = toPlainText(text);
-      if (!plain) {
-        setStatus('idle');
-        return;
-      }
+    const controller = new AbortController();
+    const session = {
+      cancelled: false,
+      urls: new Array(chunks.length).fill(null),
+      pending: new Array(chunks.length).fill(null),
+      currentAudio: null,
+      cancel() {
+        if (session.cancelled) return;
+        session.cancelled = true;
+        try {
+          controller.abort();
+        } catch {
+          // ignore
+        }
+        if (session.currentAudio) {
+          try {
+            session.currentAudio.pause();
+          } catch {
+            // ignore
+          }
+          session.currentAudio = null;
+        }
+        for (const url of session.urls) {
+          if (url) URL.revokeObjectURL(url);
+        }
+      },
+    };
+    sessionRef.current = session;
+    currentAudioController.stopper = () => {
+      session.cancel();
+      setStatus('idle');
+    };
+
+    // Prefetch chunks with limited concurrency; first chunk gets priority.
+    const MAX_CONCURRENT = 3;
+    let nextToFetch = 0;
+    let inFlight = 0;
+
+    const fetchChunk = async (i) => {
       const res = await fetch('/api/speak', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: plain }),
+        body: JSON.stringify({ text: chunks[i] }),
         signal: controller.signal,
       });
       if (!res.ok) {
@@ -149,40 +208,65 @@ function ReadAloudButton({ text }) {
         throw new Error(body.error || `Request failed (${res.status})`);
       }
       const blob = await res.blob();
+      if (session.cancelled) return null;
       const url = URL.createObjectURL(blob);
-      const audio = new Audio(url);
+      session.urls[i] = url;
+      return url;
+    };
 
-      const cleanup = () => {
-        if (currentAudioController.audio === audio) {
-          currentAudioController.audio = null;
-          currentAudioController.url = null;
-          currentAudioController.stopper = null;
-        }
-        URL.revokeObjectURL(url);
-        setStatus('idle');
-      };
-
-      audio.onended = cleanup;
-      audio.onerror = () => {
-        cleanup();
-        setError('Playback failed');
-      };
-
-      currentAudioController.audio = audio;
-      currentAudioController.url = url;
-      currentAudioController.stopper = () => setStatus('idle');
-
-      await audio.play();
-      setStatus('playing');
-    } catch (err) {
-      if (err?.name === 'AbortError') {
-        setStatus('idle');
-        return;
+    const pump = () => {
+      while (
+        !session.cancelled &&
+        inFlight < MAX_CONCURRENT &&
+        nextToFetch < chunks.length
+      ) {
+        const i = nextToFetch++;
+        inFlight++;
+        session.pending[i] = fetchChunk(i).finally(() => {
+          inFlight--;
+          pump();
+        });
       }
-      setError(err?.message || 'Read-aloud failed');
-      setStatus('idle');
+    };
+    pump();
+
+    try {
+      for (let i = 0; i < chunks.length; i++) {
+        if (session.cancelled) break;
+        const url = await session.pending[i];
+        if (session.cancelled || !url) break;
+
+        const audio = new Audio(url);
+        session.currentAudio = audio;
+
+        await new Promise((resolve, reject) => {
+          audio.onended = resolve;
+          audio.onerror = () => reject(new Error('Playback failed'));
+          audio.play().then(
+            () => {
+              if (i === 0 && !session.cancelled) setStatus('playing');
+            },
+            reject,
+          );
+        });
+
+        if (session.currentAudio === audio) session.currentAudio = null;
+        URL.revokeObjectURL(url);
+        session.urls[i] = null;
+      }
+    } catch (err) {
+      if (!session.cancelled && err?.name !== 'AbortError') {
+        setError(err?.message || 'Read-aloud failed');
+      }
     } finally {
-      abortRef.current = null;
+      if (sessionRef.current === session) {
+        sessionRef.current = null;
+      }
+      if (currentAudioController.stopper && !session.cancelled) {
+        currentAudioController.stopper = null;
+      }
+      session.cancel();
+      setStatus('idle');
     }
   }
 
